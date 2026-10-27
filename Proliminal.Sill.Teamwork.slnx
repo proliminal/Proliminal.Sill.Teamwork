@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/TeamworkTimer/TeamworkTimer.csproj" />
+  <Folder Name="/tests/">
+    <Project Path="tests/TeamworkTimer.Tests/TeamworkTimer.Tests.csproj" />
+  </Folder>
+</Solution>

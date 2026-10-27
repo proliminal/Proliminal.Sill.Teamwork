@@ -1,0 +1,286 @@
+using Proliminal.Sill.Plugins.TeamworkTimer.Settings;
+using Proliminal.Sill.Plugins.TeamworkTimer.Teamwork;
+using Proliminal.Sill.Sdk;
+using Proliminal.Sill.Sdk.Abstractions;
+
+namespace Proliminal.Sill.Plugins.TeamworkTimer.Tracking;
+
+/// <summary>
+///     The user's timer as Teamwork has it, and what's done to it: started, paused, resumed, logged or discarded. Nothing
+///     is stored: what runs is read from Teamwork every few minutes, so a timer started or stopped there shows up here. A
+///     log Teamwork didn't take is kept, tried again and shown on Home until it's logged. All of it on Sill's UI thread.
+/// </summary>
+internal sealed class TimeTracker : IDisposable
+{
+    // How often Teamwork is asked about timers started or stopped there, and how often a log it didn't take is tried again.
+    private static readonly TimeSpan _pollInterval = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan _retryInterval = TimeSpan.FromMinutes(1);
+
+    private readonly IPluginContext _context;
+    private readonly TeamworkClient _client;
+    private readonly TeamworkConnection _connection;
+    private readonly CancellationToken _cancellation;
+
+    // The timer as Teamwork last said or as it was last changed here: running, or paused until it's logged. Null when
+    // there's none.
+    private readonly State<TrackedTimer?> _timer = Values.State<TrackedTimer?>(null);
+
+    // How long it has run, as a clock that ticks while it runs.
+    private readonly State<string?> _clock = Values.State<string?>(null);
+
+    private readonly State<PendingLog?> _pendingLog = Values.State<PendingLog?>(null);
+
+    // The timers paused here, until they're logged or discarded. A paused timer this plugin didn't pause is left alone,
+    // as it may be paused on purpose in Teamwork.
+    private readonly HashSet<long> _pausedHere = [];
+
+    private Timer? _clockTicker;
+    private Timer? _poller;
+
+    // Whether the log that waits failed in a way that trying again may fix.
+    private bool _isPendingLogRetryable;
+
+    public TimeTracker(IPluginContext context, TeamworkClient client, TeamworkConnection connection, CancellationToken cancellation)
+    {
+        _context = context;
+        _client = client;
+        _connection = connection;
+        _cancellation = cancellation;
+
+        _timer.Changed += UpdateClock;
+    }
+
+    /// <summary>
+    ///     Raised after the timers were read from Teamwork, as what runs may have changed there.
+    /// </summary>
+    public event Action? TimersRead;
+
+    /// <summary>
+    ///     The timer, running or paused until it's logged; <see langword="null"/> when there's none.
+    /// </summary>
+    public IReadOnlyValue<TrackedTimer?> Timer
+        => _timer;
+
+    /// <summary>
+    ///     How long the timer has run, as <c>1:23:07</c>; <see langword="null"/> when there's none.
+    /// </summary>
+    public IReadOnlyValue<string?> Clock
+        => _clock;
+
+    /// <summary>
+    ///     The log Teamwork didn't take, if any.
+    /// </summary>
+    public IReadOnlyValue<PendingLog?> PendingLog
+        => _pendingLog;
+
+    /// <summary>
+    ///     Starts the clock and reading Teamwork: the first time right after Sill started, not while it waits for the
+    ///     plugin.
+    /// </summary>
+    public void StartPolling()
+    {
+        // What's posted after the plugin is turned off doesn't run.
+        _clockTicker = new Timer(_ => _context.Post(UpdateClock), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        _poller = new Timer(_ => _context.Post(PollTeamwork), null, TimeSpan.FromSeconds(2), _pollInterval);
+    }
+
+    /// <summary>
+    ///     Starts a timer on <paramref name="task"/>.
+    /// </summary>
+    public async Task StartTimerAsync(TeamworkTask task, string description, bool isBillable)
+    {
+        var (site, token) = _connection.RequireConnection();
+
+        _timer.Value = await _client.StartTimerAsync(site, token, task, description, isBillable, _cancellation);
+    }
+
+    /// <summary>
+    ///     Pauses the running timer, as before its time is logged.
+    /// </summary>
+    /// <returns>The paused timer.</returns>
+    public async Task<TrackedTimer> PauseRunningTimerAsync()
+    {
+        var (site, token) = _connection.RequireConnection();
+
+        var running = _timer.Value is { IsRunning: true } timer
+            ? timer
+            : throw new TeamworkException("The timer isn't running any more; it may have been stopped in Teamwork.");
+
+        var paused = await _client.PauseTimerAsync(site, token, running, _cancellation);
+
+        _pausedHere.Add(paused.Id);
+        _timer.Value = paused;
+
+        return paused;
+    }
+
+    /// <summary>
+    ///     Runs the paused <paramref name="timer"/> again.
+    /// </summary>
+    public async Task ResumeTimerAsync(TrackedTimer timer)
+    {
+        var (site, token) = _connection.RequireConnection();
+
+        _timer.Value = await _client.ResumeTimerAsync(site, token, timer, _cancellation);
+        _pausedHere.Remove(timer.Id);
+    }
+
+    /// <summary>
+    ///     Logs <paramref name="minutes"/> of the paused <paramref name="timer"/> on its task. When Teamwork doesn't take it,
+    ///     it's kept to try again and shown on Home, and the error is thrown.
+    /// </summary>
+    public async Task LogTimeAsync(TrackedTimer timer, int minutes, string description, bool isBillable)
+    {
+        var (site, token) = _connection.RequireConnection();
+        var log = new PendingLog(timer, minutes, description, isBillable);
+
+        try
+        {
+            await _client.LogTimerAsync(site, token, timer, minutes * 60, description, isBillable, _cancellation);
+        }
+        catch (TeamworkException ex)
+        {
+            KeepPendingLog(log, ex);
+            throw;
+        }
+
+        ForgetTimer(timer);
+    }
+
+    /// <summary>
+    ///     Throws the paused <paramref name="timer"/> away without logging it.
+    /// </summary>
+    public async Task DiscardTimerAsync(TrackedTimer timer)
+    {
+        var (site, token) = _connection.RequireConnection();
+
+        await _client.DeleteTimerAsync(site, token, timer.Id, _cancellation);
+
+        ForgetTimer(timer);
+    }
+
+    /// <summary>
+    ///     Tries the log Teamwork didn't take again, if there's one.
+    /// </summary>
+    public async Task RetryPendingLogAsync()
+    {
+        if (_pendingLog.Value is not { } log)
+            return;
+
+        await LogTimeAsync(log.Timer, log.Minutes, log.Description, log.IsBillable);
+
+        _context.Notify(_context.Info.Name, $"Logged {Duration.FormatMinutes(log.Minutes)} on {log.Timer.Task.Label}.", NotificationKind.Info);
+    }
+
+    /// <summary>
+    ///     Reads what runs from Teamwork now.
+    /// </summary>
+    public async Task RefreshTimersAsync()
+    {
+        var (site, token) = _connection.RequireConnection();
+
+        ApplyTimers(await _client.GetTimersAsync(site, token, _cancellation));
+    }
+
+    /// <summary>
+    ///     Reads what runs from Teamwork now, if it can be reached; what fails is only logged.
+    /// </summary>
+    public async Task RefreshTimersQuietlyAsync()
+    {
+        if (!_connection.TryGetConnection(out _, out _))
+            return;
+
+        try
+        {
+            await RefreshTimersAsync();
+        }
+        catch (Exception ex)
+        {
+            _context.Log.Info($"Couldn't read the timers from Teamwork: {ex.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        _clockTicker?.Dispose();
+        _poller?.Dispose();
+    }
+
+    private void UpdateClock()
+        => _clock.Value = _timer.Value is { } timer ? Duration.FormatClock(timer.ElapsedAt(DateTimeOffset.UtcNow)) : null;
+
+    // Every few minutes, and every minute while a log waits: tries that again, and reads what runs in Teamwork.
+    private async void PollTeamwork()
+    {
+        if (!_connection.TryGetConnection(out _, out _))
+            return;
+
+        try
+        {
+            // A token Teamwork didn't take stays wrong until it's changed; a site that couldn't be reached may be back.
+            if (_pendingLog.Value is not null && _isPendingLogRetryable)
+                await RetryPendingLogAsync();
+
+            await RefreshTimersAsync();
+        }
+        catch (Exception ex) when (ex is TeamworkException or OperationCanceledException)
+        {
+            _context.Log.Info($"Couldn't read the timers from Teamwork: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            _context.Log.Warning("Reading the timers from Teamwork failed.", ex);
+        }
+    }
+
+    // What Teamwork says runs: the running timer, or else one this plugin paused, as long as Teamwork still has it.
+    private void ApplyTimers(IReadOnlyList<TrackedTimer> timers)
+    {
+        var known = new[] { _timer.Value, _pendingLog.Value?.Timer }.OfType<TrackedTimer>().Select(timer => timer.Id).Concat(_pausedHere).ToHashSet();
+
+        _timer.Value = timers.FirstOrDefault(timer => timer.IsRunning)
+            ?? timers.FirstOrDefault(timer => !timer.IsRunning && known.Contains(timer.Id));
+
+        // Logged or deleted in Teamwork meanwhile.
+        _pausedHere.IntersectWith(timers.Select(timer => timer.Id));
+
+        if (_pendingLog.Value is { } pending && timers.All(timer => timer.Id != pending.Timer.Id))
+            SetPendingLog(null);
+
+        TimersRead?.Invoke();
+    }
+
+    // The timer is logged or thrown away: it's gone from Teamwork, and from here.
+    private void ForgetTimer(TrackedTimer timer)
+    {
+        if (_timer.Value?.Id == timer.Id)
+            _timer.Value = null;
+
+        _pausedHere.Remove(timer.Id);
+
+        if (_pendingLog.Value?.Timer.Id == timer.Id)
+            SetPendingLog(null);
+    }
+
+    private void KeepPendingLog(PendingLog log, TeamworkException error)
+    {
+        _isPendingLogRetryable = error.IsRetryable;
+        SetPendingLog(log);
+
+        _context.ReportProblem(error.IsRetryable
+            ? $"{Duration.FormatMinutes(log.Minutes)} on {log.Timer.Task.Label} isn't logged yet: {error.Message} Sill tries again every minute; the timer waits, paused, in Teamwork."
+            : $"{Duration.FormatMinutes(log.Minutes)} on {log.Timer.Task.Label} isn't logged: {error.Message} The timer waits, paused, in Teamwork; log it again from Track time.");
+    }
+
+    // Tried again every minute while there's one, every few minutes otherwise.
+    private void SetPendingLog(PendingLog? log)
+    {
+        _pendingLog.Value = log;
+
+        if (log is null)
+            _context.ReportProblem(null);
+
+        var interval = log is null ? _pollInterval : _retryInterval;
+        _poller?.Change(interval, interval);
+    }
+}

@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Sill loads it from %APPDATA%\Proliminal\Sill\plugins\TeamworkTimer\TeamworkTimer.dll: a folder with a DLL of the
+       same name. It only uses the SDK and .NET, so it brings nothing else. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Proliminal.Sill.Plugins.TeamworkTimer</RootNamespace>
+    <AssemblyName>TeamworkTimer</AssemblyName>
+    <!-- Copies the plugin's own dependencies next to it, for its load context to find. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+
+  <!-- What Sill shows about the plugin before it's loaded, when it asks whether to load it. -->
+  <PropertyGroup>
+    <Product>Teamwork timer</Product>
+    <Company>Proliminal</Company>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TeamworkTimer.Tests" />
+  </ItemGroup>
+
+  <!-- The SDK exported from Sill; where it is, is in ..\..\Directory.Build.props. It isn't copied to the plugin: Sill has
+       its own, and a plugin must use Sill's. Proliminal.Sill.Sdk.xml next to it gives IntelliSense. -->
+  <ItemGroup>
+    <Reference Include="Proliminal.Sill.Sdk">
+      <HintPath>$(SillSdk)</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Debug builds go straight to Sill's plugins folder. Sill asks again after each build, as the DLL changed; a running
+       Sill keeps the file open, so it's skipped with a warning then. Build with -p:CopyToSill=false to leave it alone. -->
+  <Target Name="CopyToPluginsFolder" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug' And '$(CopyToSill)' != 'false'">
+    <ItemGroup>
+      <_PluginFile Include="$(TargetDir)**\*" Exclude="$(TargetDir)Proliminal.Sill.Sdk.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_PluginFile)" DestinationFolder="$(APPDATA)\Proliminal\Sill\plugins\$(AssemblyName)\%(RecursiveDir)" SkipUnchangedFiles="true" ContinueOnError="WarnAndContinue" />
+  </Target>
+
+</Project>
