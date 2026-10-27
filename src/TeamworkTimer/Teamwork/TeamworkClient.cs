@@ -7,22 +7,10 @@ using System.Text.Json;
 
 namespace Proliminal.Sill.Plugins.TeamworkTimer.Teamwork;
 
-/// <summary>
-///     The parts of Teamwork's API v3 the timer uses: a task's name, and the user's own timers, which Teamwork keeps, so
-///     one started here shows in Teamwork and the other way around. Each call takes the site and token as they are now,
-///     as they're changed on the plugin's page.
-/// </summary>
-/// <remarks>
-///     It signs in with the API token as the user name of basic authentication, which Teamwork accepts with any password.
-/// </remarks>
 internal sealed class TeamworkClient(HttpClient http)
 {
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
 
-    /// <summary>
-    ///     The site's address from what was typed, such as <c>example.teamwork.com</c> or a link into it: always
-    ///     <c>https</c>, without a path. <see langword="null"/> when it isn't one.
-    /// </summary>
     public static Uri? ParseSite(string? text)
     {
         text = text?.Trim();
@@ -38,9 +26,6 @@ internal sealed class TeamworkClient(HttpClient http)
             : null;
     }
 
-    /// <summary>
-    ///     The task <paramref name="id"/>, with its project.
-    /// </summary>
     public async Task<TeamworkTask> GetTaskAsync(Uri site, string token, long id, CancellationToken cancellation)
     {
         using var document = await SendRequestAsync(site, token, HttpMethod.Get, $"projects/api/v3/tasks/{id}.json?include=tasklists,projects", null, cancellation,
@@ -66,9 +51,6 @@ internal sealed class TeamworkClient(HttpClient http)
         return new TeamworkTask(id, task.GetProperty("name").GetString() ?? $"Task {id}", project, projectId);
     }
 
-    /// <summary>
-    ///     The user's timers, running or paused, with their tasks.
-    /// </summary>
     public async Task<IReadOnlyList<TrackedTimer>> GetTimersAsync(Uri site, string token, CancellationToken cancellation)
     {
         using var document = await SendRequestAsync(site, token, HttpMethod.Get, "projects/api/v3/me/timers.json?include=tasks,projects&pageSize=50", null, cancellation);
@@ -81,9 +63,6 @@ internal sealed class TeamworkClient(HttpClient http)
             .ToArray();
     }
 
-    /// <summary>
-    ///     Starts a timer on <paramref name="task"/>, in its project.
-    /// </summary>
     public async Task<TrackedTimer> StartTimerAsync(Uri site, string token, TeamworkTask task, string description, bool isBillable, CancellationToken cancellation)
     {
         task = await EnsureProjectAsync(site, token, task, cancellation);
@@ -96,26 +75,12 @@ internal sealed class TeamworkClient(HttpClient http)
             ?? throw new TeamworkException("Teamwork started a timer that isn't on a task.");
     }
 
-    /// <summary>
-    ///     Pauses the timer, so its time stops adding up.
-    /// </summary>
     public Task<TrackedTimer> PauseTimerAsync(Uri site, string token, TrackedTimer timer, CancellationToken cancellation)
         => ChangeTimerAsync(site, token, timer, "pause", cancellation);
 
-    /// <summary>
-    ///     Runs the paused timer again.
-    /// </summary>
     public Task<TrackedTimer> ResumeTimerAsync(Uri site, string token, TrackedTimer timer, CancellationToken cancellation)
         => ChangeTimerAsync(site, token, timer, "resume", cancellation);
 
-    /// <summary>
-    ///     Logs <paramref name="seconds"/> on the timer's task and removes the timer: the timer is first set to that
-    ///     time, description and billable flag, then completed, which Teamwork turns into a time log.
-    /// </summary>
-    /// <remarks>
-    ///     The edit sends the task and project along with the time, as a PUT sets the whole timer: what it leaves out goes,
-    ///     and a timer without its project is logged as the site's, which Teamwork refuses.
-    /// </remarks>
     public async Task LogTimerAsync(Uri site, string token, TrackedTimer timer, int seconds, string description, bool isBillable, CancellationToken cancellation)
     {
         var task = await EnsureProjectAsync(site, token, timer.Task, cancellation);
@@ -126,9 +91,6 @@ internal sealed class TeamworkClient(HttpClient http)
         (await SendRequestAsync(site, token, HttpMethod.Put, $"projects/api/v3/me/timers/{timer.Id}/complete.json", new { }, cancellation)).Dispose();
     }
 
-    /// <summary>
-    ///     Removes the timer without logging its time.
-    /// </summary>
     public async Task DeleteTimerAsync(Uri site, string token, long timerId, CancellationToken cancellation)
         => (await SendRequestAsync(site, token, HttpMethod.Delete, $"projects/api/v3/me/timers/{timerId}.json", null, cancellation)).Dispose();
 

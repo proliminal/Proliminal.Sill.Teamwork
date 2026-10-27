@@ -1,18 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Sill loads it from %APPDATA%\Proliminal\Sill\plugins\TeamworkTimer\TeamworkTimer.dll: a folder with a DLL of the
-       same name. It only uses the SDK and .NET, so it brings nothing else. -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>Proliminal.Sill.Plugins.TeamworkTimer</RootNamespace>
     <AssemblyName>TeamworkTimer</AssemblyName>
-    <!-- Copies the plugin's own dependencies next to it, for its load context to find. -->
     <EnableDynamicLoading>true</EnableDynamicLoading>
   </PropertyGroup>
 
-  <!-- What Sill shows about the plugin before it's loaded, when it asks whether to load it. -->
+  <!-- Shown by Sill when it asks whether to load the plugin. -->
   <PropertyGroup>
     <Product>Teamwork timer</Product>
     <Company>Proliminal</Company>
@@ -23,8 +20,7 @@
     <InternalsVisibleTo Include="TeamworkTimer.Tests" />
   </ItemGroup>
 
-  <!-- The SDK exported from Sill; where it is, is in ..\..\Directory.Build.props. It isn't copied to the plugin: Sill has
-       its own, and a plugin must use Sill's. Proliminal.Sill.Sdk.xml next to it gives IntelliSense. -->
+  <!-- Not copied: Sill loads plugins with its own SDK. -->
   <ItemGroup>
     <Reference Include="Proliminal.Sill.Sdk">
       <HintPath>$(SillSdk)</HintPath>
@@ -32,8 +28,7 @@
     </Reference>
   </ItemGroup>
 
-  <!-- Debug builds go straight to Sill's plugins folder. Sill asks again after each build, as the DLL changed; a running
-       Sill keeps the file open, so it's skipped with a warning then. Build with -p:CopyToSill=false to leave it alone. -->
+  <!-- Debug builds install into Sill's plugins folder; -p:CopyToSill=false skips that. -->
   <Target Name="CopyToPluginsFolder" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug' And '$(CopyToSill)' != 'false'">
     <ItemGroup>
       <_PluginFile Include="$(TargetDir)**\*" Exclude="$(TargetDir)Proliminal.Sill.Sdk.*" />

@@ -1,14 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Tests of the Teamwork timer plugin. Everything shared with other test projects is in ..\Directory.Build.props. -->
   <ItemGroup>
-    <!-- Not copied to the real plugins folder, as a Debug build of the plugin otherwise is: tests leave the user's Sill
-         alone. -->
     <ProjectReference Include="..\..\src\TeamworkTimer\TeamworkTimer.csproj" AdditionalProperties="CopyToSill=false" />
-  </ItemGroup>
-
-  <!-- The plugin leaves the SDK out, as Sill has it; the tests need it next to them to run. -->
-  <ItemGroup>
     <Reference Include="Proliminal.Sill.Sdk">
       <HintPath>$(SillSdk)</HintPath>
     </Reference>

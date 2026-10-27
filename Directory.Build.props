@@ -1,8 +1,6 @@
 <Project>
 
-  <!-- The Sill SDK the plugin builds against, as any plugin does: the Proliminal.Sill.Sdk.dll that Sill exports from its
-       plugin documentation page (Export SDK), into sdk\ here. Point it at another copy with
-       -p:SillSdk=<path to Proliminal.Sill.Sdk.dll>, such as a local build of Sill's. -->
+  <!-- The SDK to build against; override with -p:SillSdk=<path to Proliminal.Sill.Sdk.dll>. -->
   <PropertyGroup>
     <SillSdk Condition="'$(SillSdk)' == ''">$(MSBuildThisFileDirectory)sdk\Proliminal.Sill.Sdk.dll</SillSdk>
   </PropertyGroup>

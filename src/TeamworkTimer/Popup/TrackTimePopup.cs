@@ -8,11 +8,6 @@ using Proliminal.Sill.Sdk.Pages;
 
 namespace Proliminal.Sill.Plugins.TeamworkTimer.Popup;
 
-/// <summary>
-///     The Track time popup: a task number to start a timer for, the timer that runs with Stop, and how much of a stopped
-///     timer to log. Starting another task while one runs asks to stop and log that one first. Once a command is done,
-///     it shows what comes next, as a pinned popup stays open; it also follows what changed in Teamwork.
-/// </summary>
 internal sealed class TrackTimePopup : IDisposable
 {
     private const string TITLE = "Track time";
@@ -64,10 +59,6 @@ internal sealed class TrackTimePopup : IDisposable
         _tracker.TimersRead += FollowTeamwork;
     }
 
-    /// <summary>
-    ///     Opens the popup at what fits now: what's missing to reach Teamwork, the paused timer to log, the timer that
-    ///     runs, or a new task.
-    /// </summary>
     public void Show(IActionContext action)
     {
         _taskNumber.Value = "";
@@ -95,9 +86,6 @@ internal sealed class TrackTimePopup : IDisposable
             _ = _tracker.RefreshTimersQuietlyAsync();
     }
 
-    /// <summary>
-    ///     Stops the running timer from the quick menu: pauses it, then opens the popup to log its time.
-    /// </summary>
     public async Task StopFromMenuAsync(IActionContext action)
     {
         if (_tracker.Timer.Value is { IsRunning: true } && _connection.TryGetConnection(out _, out _))

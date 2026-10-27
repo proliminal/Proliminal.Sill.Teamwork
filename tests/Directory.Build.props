@@ -1,11 +1,8 @@
 <Project>
 
-  <!-- The repository's own settings first, such as where the SDK is. -->
   <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)..'))" />
 
-  <!-- Shared by every test project under tests\, so a new one is a csproj with only the references to what it tests. -->
   <PropertyGroup>
-    <!-- xUnit v3 test projects are executables. -->
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

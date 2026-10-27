@@ -10,11 +10,6 @@ using Proliminal.Sill.Sdk.Abstractions;
 
 namespace Proliminal.Sill.Plugins.TeamworkTimer;
 
-/// <summary>
-///     Tracks time on Teamwork tasks with Teamwork's own timers: a page for the site, token and rounding, the Track time
-///     popup to start and stop timers, and a section in the quick menu to stop the one that runs. What it does is in
-///     <see cref="TimeTracker"/> and <see cref="TrackTimePopup"/>.
-/// </summary>
 public sealed class TeamworkTimerPlugin : IPlugin
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(20) };

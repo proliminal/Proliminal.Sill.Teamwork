@@ -4,9 +4,6 @@ using TeamworkTimer.Tests.Support;
 
 namespace TeamworkTimer.Tests.Teamwork;
 
-/// <summary>
-///     The client against answers shaped as Teamwork's API v3 documents them, from a stand-in for the network.
-/// </summary>
 public sealed class TeamworkClientTests : IDisposable
 {
     private static readonly Uri _site = new("https://example.teamwork.com/");
