@@ -1,11 +1,11 @@
 name: Release
 
-# Pushes to main are tested and released; pull requests are only tested. A release bumps the minor version, or the patch
-# with --patch in the commit message; --no-version skips it.
+# Pushes to master are tested and released; pull requests are only tested. A release bumps the minor version, or the
+# patch with --patch in the commit message; --no-version skips it.
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 permissions:
