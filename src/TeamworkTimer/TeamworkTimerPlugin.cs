@@ -54,7 +54,7 @@ public sealed class TeamworkTimerPlugin : IPlugin
                     .Icon(Glyph.Globe)
                     .Description("Your Teamwork address.")
                     .Placeholder("example.teamwork.com")
-                    .Status(site.Map(value => value.Length == 0 || TeamworkClient.ParseSite(value) is not null ? null : "Not a web address"), Values.State(Tone.Critical)))
+                    .Status(site.Map(value => value.Length == 0 || TeamworkClient.ParseSite(value) is not null ? null : "Not a web address"), Value.State(Tone.Critical)))
                 .TextBox("API token", connection.Token, text => text
                     .Icon(Glyph.Key)
                     .Description("In Teamwork, under your picture › Edit my details › API & Mobile. Kept encrypted on this PC, never in the settings file or an exported setup.")

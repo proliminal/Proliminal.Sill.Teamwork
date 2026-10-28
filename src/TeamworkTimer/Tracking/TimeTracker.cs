@@ -18,12 +18,12 @@ internal sealed class TimeTracker : IDisposable
 
     // The timer as Teamwork last said or as it was last changed here: running, or paused until it's logged. Null when
     // there's none.
-    private readonly State<TrackedTimer?> _timer = Values.State<TrackedTimer?>(null);
+    private readonly State<TrackedTimer?> _timer = Value.State<TrackedTimer?>(null);
 
     // How long it has run, as a clock that ticks while it runs.
-    private readonly State<string?> _clock = Values.State<string?>(null);
+    private readonly State<string?> _clock = Value.State<string?>(null);
 
-    private readonly State<PendingLog?> _pendingLog = Values.State<PendingLog?>(null);
+    private readonly State<PendingLog?> _pendingLog = Value.State<PendingLog?>(null);
 
     // The timers paused here, until they're logged or discarded. A paused timer this plugin didn't pause is left alone,
     // as it may be paused on purpose in Teamwork.

@@ -21,22 +21,22 @@ internal sealed class TrackTimePopup : IDisposable
     private readonly CancellationToken _cancellation;
 
     // What the popup asks, and what's typed in it.
-    private readonly State<TrackTimeStep> _step = Values.State(TrackTimeStep.NewTask);
-    private readonly State<string> _taskNumber = Values.State("");
-    private readonly State<string> _description = Values.State("");
-    private readonly State<bool> _billable = Values.State(true);
-    private readonly State<string> _duration = Values.State("");
+    private readonly State<TrackTimeStep> _step = Value.State(TrackTimeStep.NewTask);
+    private readonly State<string> _taskNumber = Value.State("");
+    private readonly State<string> _description = Value.State("");
+    private readonly State<bool> _billable = Value.State(true);
+    private readonly State<string> _duration = Value.State("");
 
     // A word or two beside the task number, and the task's name or what's wrong under its title, where there's room.
-    private readonly State<string?> _taskStatus = Values.State<string?>(null);
-    private readonly State<Tone> _taskTone = Values.State(Tone.Neutral);
-    private readonly State<string> _taskFound = Values.State("");
+    private readonly State<string?> _taskStatus = Value.State<string?>(null);
+    private readonly State<Tone> _taskTone = Value.State(Tone.Neutral);
+    private readonly State<string> _taskFound = Value.State("");
 
-    private readonly State<string?> _message = Values.State<string?>(null);
-    private readonly State<Tone> _messageTone = Values.State(Tone.Neutral);
+    private readonly State<string?> _message = Value.State<string?>(null);
+    private readonly State<Tone> _messageTone = Value.State(Tone.Neutral);
 
     // The paused timer whose time is being logged.
-    private readonly State<TrackedTimer?> _stopping = Values.State<TrackedTimer?>(null);
+    private readonly State<TrackedTimer?> _stopping = Value.State<TrackedTimer?>(null);
 
     // The task to start once the running timer is logged, as asked when starting another.
     private QueuedTimer? _queued;
@@ -111,7 +111,7 @@ internal sealed class TrackTimePopup : IDisposable
                 .Description(_taskFound)
                 .Placeholder("12345")
                 .MaxLength(12)
-                .WhileTyping()
+                .ChangesWhileTyping()
                 .Status(_taskStatus, _taskTone)
                 .VisibleWhen(IsStep(TrackTimeStep.NewTask)))
             .Info("Stopped", info => info
@@ -128,20 +128,20 @@ internal sealed class TrackTimePopup : IDisposable
                 .TextBox("Time to log", _duration, text => text
                     .Placeholder("1:30")
                     .MaxLength(8)
-                    .WhileTyping()
-                    .Status(_duration.Map<string, string?>(value => Duration.TryParseMinutes(value, out _) ? null : "Not a time"), Values.State(Tone.Critical))
+                    .ChangesWhileTyping()
+                    .Status(_duration.Map<string, string?>(value => Duration.TryParseMinutes(value, out _) ? null : "Not a time"), Value.State(Tone.Critical))
                     .VisibleWhen(IsStep(TrackTimeStep.LogTime)))
                 .Toggle("Billable", _billable, toggle => toggle
                     .VisibleWhen(IsStep(TrackTimeStep.NewTask, TrackTimeStep.LogTime))))
             .Message(_message, _messageTone)
             .Command("Back", _ => ReturnToRunningTimer(), command => command.Key('B').VisibleWhen(IsStep(TrackTimeStep.ConfirmSwitch)))
-            .Command("Stop it first", PauseForLoggingAsync, command => command.Default().VisibleWhen(IsStep(TrackTimeStep.ConfirmSwitch)))
+            .Command("Stop it first", PauseForLoggingAsync, command => command.IsDefault().VisibleWhen(IsStep(TrackTimeStep.ConfirmSwitch)))
             .Command("New task", _ => ShowNewTask(), command => command.Key('N').VisibleWhen(IsStep(TrackTimeStep.Running)))
-            .Command("Stop", PauseForLoggingAsync, command => command.Default().VisibleWhen(IsStep(TrackTimeStep.Running)))
-            .Command("Start", StartTimerAsync, command => command.Default().VisibleWhen(IsStep(TrackTimeStep.NewTask)))
+            .Command("Stop", PauseForLoggingAsync, command => command.IsDefault().VisibleWhen(IsStep(TrackTimeStep.Running)))
+            .Command("Start", StartTimerAsync, command => command.IsDefault().VisibleWhen(IsStep(TrackTimeStep.NewTask)))
             .Command("Discard", DiscardTimeAsync, command => command.Key('D').VisibleWhen(IsStep(TrackTimeStep.LogTime)))
             .Command("Resume", ResumeTimerAsync, command => command.Key('R').VisibleWhen(IsStep(TrackTimeStep.LogTime)))
-            .Command("Log time", LogTimeAsync, command => command.Default().VisibleWhen(IsStep(TrackTimeStep.LogTime)));
+            .Command("Log time", LogTimeAsync, command => command.IsDefault().VisibleWhen(IsStep(TrackTimeStep.LogTime)));
 
     private IReadOnlyValue<bool> IsStep(params TrackTimeStep[] steps)
         => _step.Map(steps.Contains);
