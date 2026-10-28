@@ -29,6 +29,9 @@ internal sealed class TimeTracker : IDisposable
     // as it may be paused on purpose in Teamwork.
     private readonly HashSet<long> _pausedHere = [];
 
+    // The tags picked when a timer was started here, for its time log; a timer can't keep them in Teamwork.
+    private readonly Dictionary<long, IReadOnlyList<TeamworkTag>> _tags = [];
+
     private Timer? _clockTicker;
     private Timer? _poller;
 
@@ -63,12 +66,21 @@ internal sealed class TimeTracker : IDisposable
         _poller = new Timer(_ => _context.Post(PollTeamwork), null, TimeSpan.FromSeconds(2), _pollInterval);
     }
 
-    public async Task StartTimerAsync(TeamworkTask task, string description, bool isBillable)
+    public async Task StartTimerAsync(TeamworkTask task, string description, bool isBillable, IReadOnlyList<TeamworkTag> tags)
     {
         var (site, token) = _connection.RequireConnection();
 
-        _timer.Value = await _client.StartTimerAsync(site, token, task, description, isBillable, _cancellation);
+        var started = await _client.StartTimerAsync(site, token, task, description, isBillable, _cancellation);
+
+        if (tags.Count > 0)
+            _tags[started.Id] = tags;
+
+        _timer.Value = started;
     }
+
+    // None for a timer started in Teamwork, or before Sill last started.
+    public IReadOnlyList<TeamworkTag> TagsOf(TrackedTimer timer)
+        => _tags.GetValueOrDefault(timer.Id) ?? [];
 
     public async Task<TrackedTimer> PauseRunningTimerAsync()
     {
@@ -94,14 +106,16 @@ internal sealed class TimeTracker : IDisposable
         _pausedHere.Remove(timer.Id);
     }
 
-    public async Task LogTimeAsync(TrackedTimer timer, int minutes, string description, bool isBillable)
+    public async Task LogTimeAsync(TrackedTimer timer, int minutes, string description, bool isBillable, IReadOnlyList<TeamworkTag> tags)
     {
         var (site, token) = _connection.RequireConnection();
-        var log = new PendingLog(timer, minutes, description, isBillable);
+        var log = new PendingLog(timer, minutes, description, isBillable, tags);
+
+        long? timeLogId;
 
         try
         {
-            await _client.LogTimerAsync(site, token, timer, minutes * 60, description, isBillable, _cancellation);
+            timeLogId = await _client.LogTimerAsync(site, token, timer, minutes * 60, description, isBillable, _cancellation);
         }
         catch (TeamworkException ex)
         {
@@ -110,6 +124,9 @@ internal sealed class TimeTracker : IDisposable
         }
 
         ForgetTimer(timer);
+
+        if (tags.Count > 0)
+            await TagTimeLogAsync(log, timeLogId);
     }
 
     public async Task DiscardTimerAsync(TrackedTimer timer)
@@ -126,7 +143,7 @@ internal sealed class TimeTracker : IDisposable
         if (_pendingLog.Value is not { } log)
             return;
 
-        await LogTimeAsync(log.Timer, log.Minutes, log.Description, log.IsBillable);
+        await LogTimeAsync(log.Timer, log.Minutes, log.Description, log.IsBillable, log.Tags);
 
         _context.Notify(_context.Info.Name, $"Logged {Duration.FormatMinutes(log.Minutes)} on {log.Timer.Task.Label}.", NotificationKind.Info);
     }
@@ -157,6 +174,31 @@ internal sealed class TimeTracker : IDisposable
     {
         _clockTicker?.Dispose();
         _poller?.Dispose();
+    }
+
+    // The time is logged by now, so a tag Teamwork doesn't take is only told about: logging it again would log it twice.
+    private async Task TagTimeLogAsync(PendingLog log, long? timeLogId)
+    {
+        var tags = string.Join(", ", log.Tags.Select(tag => tag.Name));
+        var what = $"{Duration.FormatMinutes(log.Minutes)} on {log.Timer.Task.Label}";
+
+        if (timeLogId is not { } id)
+        {
+            _context.Notify(_context.Info.Name, $"Logged {what}, but Teamwork didn't say which time log it is, so it doesn't have the tags {tags}. Add them in Teamwork.", NotificationKind.Warning);
+            return;
+        }
+
+        var (site, token) = _connection.RequireConnection();
+
+        try
+        {
+            await _client.TagTimeLogAsync(site, token, id, log.Tags, _cancellation);
+        }
+        catch (TeamworkException ex)
+        {
+            _context.Log.Info($"Couldn't tag time log {id}: {ex.Message}");
+            _context.Notify(_context.Info.Name, $"Logged {what}, but not its tags {tags}: {ex.Message} Add them in Teamwork.", NotificationKind.Warning);
+        }
     }
 
     private void UpdateClock()
@@ -197,6 +239,9 @@ internal sealed class TimeTracker : IDisposable
         // Logged or deleted in Teamwork meanwhile.
         _pausedHere.IntersectWith(timers.Select(timer => timer.Id));
 
+        foreach (var gone in _tags.Keys.Where(id => timers.All(timer => timer.Id != id)).ToArray())
+            _tags.Remove(gone);
+
         if (_pendingLog.Value is { } pending && timers.All(timer => timer.Id != pending.Timer.Id))
             SetPendingLog(null);
 
@@ -210,6 +255,7 @@ internal sealed class TimeTracker : IDisposable
             _timer.Value = null;
 
         _pausedHere.Remove(timer.Id);
+        _tags.Remove(timer.Id);
 
         if (_pendingLog.Value?.Timer.Id == timer.Id)
             SetPendingLog(null);

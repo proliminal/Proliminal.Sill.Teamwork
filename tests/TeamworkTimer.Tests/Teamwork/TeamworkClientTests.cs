@@ -176,6 +176,52 @@ public sealed class TeamworkClientTests : IDisposable
     }
 
     [Fact]
+    public async Task LogTimerAsync_SaysWhichTimeLogTheTimerBecame()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """{ "timer": { "id": 5 } }""");
+        _handler.QueueAnswer(HttpStatusCode.OK, """{ "timer": { "id": 5, "timeLogId": 777 } }""");
+
+        var timeLogId = await _client.LogTimerAsync(_site, "tkn", PausedTimer(new TeamworkTask(123, "Fix the login", "Website", 42)), 60, "", isBillable: true,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(777, timeLogId);
+    }
+
+    [Fact]
+    public async Task TagTimeLogAsync_SetsTheTagIds_OnTheTimeLog()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """{ "timelog": { "id": 777 } }""");
+
+        await _client.TagTimeLogAsync(_site, "tkn", 777, [new TeamworkTag(1, "Review", "#d84640", 0), new TeamworkTag(9, "Bug", null, 42)],
+            TestContext.Current.CancellationToken);
+
+        var request = _handler.Requests.Single();
+        Assert.Equal("PATCH /projects/api/v3/time/777.json", $"{request.Method} {request.Path}");
+        Assert.Equal("""{"timelog":{"tagIds":[1,9]}}""", request.Body);
+    }
+
+    [Fact]
+    public async Task GetTagsAsync_ReadsEveryPage_AndSkipsTagsWithoutAName()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """
+            {
+              "tags": [ { "id": 1, "name": "Review", "color": "#d84640", "projectId": 0 }, { "id": 2, "name": "" } ],
+              "meta": { "page": { "hasMore": true } }
+            }
+            """);
+        _handler.QueueAnswer(HttpStatusCode.OK, """
+            { "tags": [ { "id": 9, "name": "Bug", "color": "", "projectId": 42 } ], "meta": { "page": { "hasMore": false } } }
+            """);
+
+        var tags = await _client.GetTagsAsync(_site, "tkn", TestContext.Current.CancellationToken);
+
+        Assert.Equal([new TeamworkTag(1, "Review", "#d84640", 0), new TeamworkTag(9, "Bug", null, 42)], tags);
+        Assert.Equal(2, _handler.Requests.Count);
+        Assert.True(tags[0].IsFor(42));
+        Assert.False(tags[1].IsFor(7));
+    }
+
+    [Fact]
     public async Task SendRequestAsync_SaysTheTokenIsWrong_AndThatTryingAgainWontHelp()
     {
         _handler.QueueAnswer(HttpStatusCode.Unauthorized, "");
