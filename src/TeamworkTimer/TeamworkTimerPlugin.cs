@@ -6,7 +6,7 @@ using Proliminal.Sill.Sdk;
 using Proliminal.Sill.Sdk.Abstractions;
 
 [assembly: PluginUses(PluginCapability.Network,
-    "Sends the task numbers, descriptions and times you track to your Teamwork site, and reads task names and your timers from it. Nothing else leaves your PC.")]
+    "Sends the task numbers, descriptions, times and tags you track to your Teamwork site, and reads task names, tags and your timers from it. Nothing else leaves your PC.")]
 
 namespace Proliminal.Sill.Plugins.TeamworkTimer;
 
@@ -36,7 +36,7 @@ public sealed class TeamworkTimerPlugin : IPlugin
         var timerLabel = tracker.Timer.Map(timer => timer is null ? "" : timer.IsRunning ? timer.Task.Label : $"Paused, not logged yet: {timer.Task.Label}");
 
         context.SetPage(Glyph.Clock, page => page
-            .Intro("Track time on Teamwork tasks with Teamwork's own timers. Track time, in the quick menu or with a shortcut you give it, starts one for a task number; it runs in Teamwork until you stop it, from the same popup or the quick menu. Stopping asks how much to log, rounded as set below.")
+            .Intro("Track time on Teamwork tasks with Teamwork's own timers. Track time, in the quick menu or with a shortcut you give it, starts one for a task number; it runs in Teamwork until you stop it, from the same popup or the quick menu. Stopping asks how much to log, rounded as set below, and which tags the time log gets.")
             .Keywords("teamwork", "time tracking", "timesheet", "timer", "log time")
             .Group("Timer", group => group
                 .Info("Now", info => info

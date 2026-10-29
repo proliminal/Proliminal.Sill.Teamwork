@@ -81,14 +81,71 @@ internal sealed class TeamworkClient(HttpClient http)
     public Task<TrackedTimer> ResumeTimerAsync(Uri site, string token, TrackedTimer timer, CancellationToken cancellation)
         => ChangeTimerAsync(site, token, timer, "resume", cancellation);
 
-    public async Task LogTimerAsync(Uri site, string token, TrackedTimer timer, int seconds, string description, bool isBillable, CancellationToken cancellation)
+    // The time log the completed timer became, if Teamwork says, for its tags.
+    public async Task<long?> LogTimerAsync(Uri site, string token, TrackedTimer timer, int seconds, string description, bool isBillable, CancellationToken cancellation)
     {
         var task = await EnsureProjectAsync(site, token, timer.Task, cancellation);
 
         var body = new { timer = new { taskId = task.Id, projectId = task.ProjectId, seconds, description, isBillable } };
 
         (await SendRequestAsync(site, token, HttpMethod.Put, $"projects/api/v3/me/timers/{timer.Id}.json", body, cancellation)).Dispose();
-        (await SendRequestAsync(site, token, HttpMethod.Put, $"projects/api/v3/me/timers/{timer.Id}/complete.json", new { }, cancellation)).Dispose();
+
+        using var completed = await SendRequestAsync(site, token, HttpMethod.Put, $"projects/api/v3/me/timers/{timer.Id}/complete.json", new { }, cancellation);
+
+        return completed.RootElement.TryGetProperty("timer", out var logged)
+            && logged.TryGetProperty("timeLogId", out var timeLogId)
+            && timeLogId.ValueKind == JsonValueKind.Number
+            && timeLogId.GetInt64() is > 0 and var id
+                ? id
+                : null;
+    }
+
+    // A timer can't have tags, so they're put on the time log it became.
+    public async Task TagTimeLogAsync(Uri site, string token, long timeLogId, IReadOnlyList<TeamworkTag> tags, CancellationToken cancellation)
+    {
+        var body = new { timelog = new { tagIds = tags.Select(tag => tag.Id).ToArray() } };
+
+        (await SendRequestAsync(site, token, HttpMethod.Patch, $"projects/api/v3/time/{timeLogId}.json", body, cancellation,
+            notFound: "Teamwork doesn't know the time log any more; it may have been deleted there.")).Dispose();
+    }
+
+    // Every tag that can be seen, of every project, by name; a few hundred at a time.
+    public async Task<IReadOnlyList<TeamworkTag>> GetTagsAsync(Uri site, string token, CancellationToken cancellation)
+    {
+        const int pageSize = 500;
+
+        var tags = new List<TeamworkTag>();
+
+        for (var page = 1; ; page++)
+        {
+            using var document = await SendRequestAsync(site, token, HttpMethod.Get,
+                $"projects/api/v3/tags.json?orderBy=name&pageSize={pageSize}&page={page}", null, cancellation);
+
+            var root = document.RootElement;
+            var found = root.TryGetProperty("tags", out var items) && items.ValueKind == JsonValueKind.Array ? items.EnumerateArray().ToArray() : [];
+
+            tags.AddRange(found.Select(ReadTag).OfType<TeamworkTag>());
+
+            var hasMore = root.TryGetProperty("meta", out var meta)
+                && meta.TryGetProperty("page", out var paging)
+                && paging.TryGetProperty("hasMore", out var more)
+                && more.ValueKind == JsonValueKind.True;
+
+            if (!hasMore || found.Length == 0)
+                return tags;
+        }
+    }
+
+    private static TeamworkTag? ReadTag(JsonElement tag)
+    {
+        if (!tag.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number
+            || !tag.TryGetProperty("name", out var name) || name.GetString() is not { Length: > 0 } text)
+            return null;
+
+        var color = tag.TryGetProperty("color", out var colorElement) && colorElement.ValueKind == JsonValueKind.String ? colorElement.GetString() : null;
+        var projectId = tag.TryGetProperty("projectId", out var project) && project.ValueKind == JsonValueKind.Number ? project.GetInt64() : 0;
+
+        return new TeamworkTag(id.GetInt64(), text, string.IsNullOrWhiteSpace(color) ? null : color, projectId);
     }
 
     public async Task DeleteTimerAsync(Uri site, string token, long timerId, CancellationToken cancellation)
