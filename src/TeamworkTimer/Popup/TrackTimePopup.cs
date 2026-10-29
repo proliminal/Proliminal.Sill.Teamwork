@@ -15,7 +15,7 @@ internal sealed class TrackTimePopup : IDisposable
     // How long typing pauses before the task is looked up.
     private static readonly TimeSpan _lookupDelay = TimeSpan.FromMilliseconds(400);
 
-    // How long the tags read from Teamwork are kept before the popup reads them again.
+    // How long the tags and projects read from Teamwork are kept before the popup reads them again.
     private static readonly TimeSpan _tagsAge = TimeSpan.FromMinutes(10);
 
     private readonly TimeTracker _tracker;
@@ -30,6 +30,12 @@ internal sealed class TrackTimePopup : IDisposable
     private readonly State<bool> _billable = Value.State(true);
     private readonly State<string> _duration = Value.State("");
     private readonly State<IReadOnlyList<TeamworkTag>> _tags = Value.State<IReadOnlyList<TeamworkTag>>([]);
+
+    // The project for time that isn't on a task, picked when no task number is typed.
+    private readonly State<TeamworkProject?> _project = Value.State<TeamworkProject?>(null);
+    private readonly State<IReadOnlyList<TeamworkProject?>> _projects = Value.State<IReadOnlyList<TeamworkProject?>>([]);
+    private readonly IReadOnlyValue<bool> _isWithoutTask;
+    private DateTimeOffset? _projectsReadAt;
 
     // The tags to pick from: those for every project, then those of the task's project once it's known.
     private readonly State<IReadOnlyList<TeamworkTag>> _allTags = Value.State<IReadOnlyList<TeamworkTag>>([]);
@@ -68,13 +74,17 @@ internal sealed class TrackTimePopup : IDisposable
         _tagOptions = _allTags.Combine(_tagsTask, (tags, task) => (IReadOnlyList<TeamworkTag>)
             [.. tags.Where(tag => tag.IsFor(task?.ProjectId)).OrderBy(tag => tag.ProjectId == 0 ? 0 : 1)]);
 
+        _isWithoutTask = _step.Combine(_taskNumber, (step, number) => step == TrackTimeStep.NewTask && number.Trim().Length == 0);
+
         _taskNumber.Changed += () => _ = LookUpTaskAsync();
+        _project.Changed += FollowProject;
         _tracker.TimersRead += FollowTeamwork;
     }
 
     public void Show(IActionContext action)
     {
         _taskNumber.Value = "";
+        _project.Value = null;
         _description.Value = "";
         _billable.Value = true;
         _tags.Value = [];
@@ -101,6 +111,7 @@ internal sealed class TrackTimePopup : IDisposable
             _ = _tracker.RefreshTimersQuietlyAsync();
 
         _ = ReadTagsQuietlyAsync();
+        _ = ReadProjectsQuietlyAsync();
     }
 
     public async Task StopFromMenuAsync(IActionContext action)
@@ -114,6 +125,7 @@ internal sealed class TrackTimePopup : IDisposable
     public void Dispose()
     {
         _lookup?.Cancel();
+        _project.Changed -= FollowProject;
         _tracker.TimersRead -= FollowTeamwork;
     }
 
@@ -126,11 +138,15 @@ internal sealed class TrackTimePopup : IDisposable
                 .VisibleWhen(IsStep(TrackTimeStep.Running, TrackTimeStep.ConfirmSwitch)))
             .TextBox("Task number", _taskNumber, text => text
                 .Description(_taskFound)
-                .Placeholder("12345")
+                .Placeholder("12345, or none for a project")
                 .MaxLength(12)
                 .ChangesWhileTyping()
                 .Status(_taskStatus, _taskTone)
                 .VisibleWhen(IsStep(TrackTimeStep.NewTask)))
+            .Picker("Project", _project, picker => picker
+                .Description("For time that isn't on a task.")
+                .Options(_projects, project => project?.Name ?? "")
+                .VisibleWhen(_isWithoutTask))
             .Info("Stopped", info => info
                 .Icon(Glyph.Clock)
                 .Description(_stopping.Map(timer => timer?.Task.Label ?? ""))
@@ -173,9 +189,14 @@ internal sealed class TrackTimePopup : IDisposable
     private async Task StartTimerAsync(IActionContext action)
     {
         var (site, token) = _connection.RequireConnection();
-        var id = ParseTaskNumber() ?? throw new TeamworkException("Type the task's number, such as 12345.");
 
-        var task = _lookedUpTask?.Id == id ? _lookedUpTask : await _client.GetTaskAsync(site, token, id, _cancellation);
+        var task = ParseTaskNumber() is { } id
+            ? _lookedUpTask?.Id == id ? _lookedUpTask : await _client.GetTaskAsync(site, token, id, _cancellation)
+            : _taskNumber.Value.Trim().Length > 0
+                ? throw new TeamworkException("Type the task's number, such as 12345.")
+                : _project.Value is { } project
+                    ? TeamworkTask.ForProject(project.Id, project.Name)
+                    : throw new TeamworkException("Type a task number, or pick the project for time that isn't on a task.");
 
         // One may have been started in Teamwork since.
         await _tracker.RefreshTimersAsync();
@@ -184,16 +205,50 @@ internal sealed class TrackTimePopup : IDisposable
 
         if (_tracker.Timer.Value is { IsRunning: true } running)
         {
+            if (running.Task.IsSameAs(task))
+            {
+                ShowNextStep();
+                ShowMessage($"{task.Reference} is running already.");
+                return;
+            }
+
             _queued = queued;
             _step.Value = TrackTimeStep.ConfirmSwitch;
-            ShowMessage($"{running.Task.Label} is running. Stop it and log its time before starting #{task.Id}?");
+            ShowMessage($"{running.Task.Label} is running. Stop it and log its time before starting {task.Reference}?");
             return;
         }
 
-        await _tracker.StartTimerAsync(queued.Task, queued.Description, queued.IsBillable, queued.Tags);
+        if (!await StartOrPickUpAsync(queued))
+            return;
 
         ShowNextStep();
         action.ClosePopup();
+    }
+
+    // Teamwork starts no second timer for a task that has a paused one, so that one is shown instead, to resume, log or
+    // discard. False when it is, and the popup stays open for it.
+    private async Task<bool> StartOrPickUpAsync(QueuedTimer queued)
+    {
+        if (_tracker.FindPausedTimer(queued.Task) is not { } paused)
+        {
+            await _tracker.StartTimerAsync(queued.Task, queued.Description, queued.IsBillable, queued.Tags);
+            return true;
+        }
+
+        _tracker.PickUp(paused);
+        ShowLogStep(paused);
+
+        // What was typed for it, where Teamwork has nothing.
+        if (_description.Value.Length == 0)
+            _description.Value = queued.Description;
+
+        if (_tags.Value.Count == 0)
+            _tags.Value = queued.Tags;
+
+        ShowMessage($"{queued.Task.Reference} has a paused timer in Teamwork already, at {Duration.FormatClock(paused.Elapsed)}. Resume it, log its time, or discard it.",
+            Tone.Caution);
+
+        return false;
     }
 
     private async Task PauseForLoggingAsync(IActionContext action)
@@ -221,7 +276,8 @@ internal sealed class TrackTimePopup : IDisposable
 
         _stopping.Value = null;
 
-        await StartQueuedTimerAsync();
+        if (!await StartQueuedTimerAsync())
+            return;
 
         ShowNextStep();
         action.ClosePopup();
@@ -234,7 +290,7 @@ internal sealed class TrackTimePopup : IDisposable
         if (!_isDiscardArmed)
         {
             _isDiscardArmed = true;
-            ShowMessage($"Press Discard again to throw away the {Duration.FormatClock(stopping.Elapsed)} on #{stopping.Task.Id} without logging it.", Tone.Caution);
+            ShowMessage($"Press Discard again to throw away the {Duration.FormatClock(stopping.Elapsed)} on {stopping.Task.Reference} without logging it.", Tone.Caution);
             return;
         }
 
@@ -242,7 +298,8 @@ internal sealed class TrackTimePopup : IDisposable
 
         _stopping.Value = null;
 
-        await StartQueuedTimerAsync();
+        if (!await StartQueuedTimerAsync())
+            return;
 
         ShowNextStep();
         action.ClosePopup();
@@ -260,21 +317,23 @@ internal sealed class TrackTimePopup : IDisposable
         _step.Value = TrackTimeStep.Running;
     }
 
-    // Starts what was asked for while another ran. If that fails, the popup goes back to it, as typed.
-    private async Task StartQueuedTimerAsync()
+    // Starts what was asked for while another ran. If that fails, the popup goes back to it, as typed. False when it
+    // shows a paused timer of it instead.
+    private async Task<bool> StartQueuedTimerAsync()
     {
         if (_queued is not { } queued)
-            return;
+            return true;
 
         _queued = null;
 
         try
         {
-            await _tracker.StartTimerAsync(queued.Task, queued.Description, queued.IsBillable, queued.Tags);
+            return await StartOrPickUpAsync(queued);
         }
         catch (Exception)
         {
-            _taskNumber.Value = queued.Task.Id.ToString(CultureInfo.InvariantCulture);
+            _project.Value = queued.Task.Id is null ? _projects.Value.FirstOrDefault(project => project?.Id == queued.Task.ProjectId) : null;
+            _taskNumber.Value = queued.Task.Id?.ToString(CultureInfo.InvariantCulture) ?? "";
             _description.Value = queued.Description;
             _billable.Value = queued.IsBillable;
             _tags.Value = queued.Tags;
@@ -292,7 +351,7 @@ internal sealed class TrackTimePopup : IDisposable
         _tagsTask.Value = paused.Task;
         _tags.Value = _tracker.TagsOf(paused);
         _isDiscardArmed = false;
-        _message.Value = _queued is { } queued ? $"Then #{queued.Task.Id} {queued.Task.Name} starts." : null;
+        _message.Value = _queued is { } queued ? $"Then {queued.Task.Label} starts." : null;
         _messageTone.Value = Tone.Neutral;
         _step.Value = TrackTimeStep.LogTime;
     }
@@ -307,6 +366,7 @@ internal sealed class TrackTimePopup : IDisposable
     private void ShowNewTask()
     {
         _taskNumber.Value = "";
+        _project.Value = null;
         _description.Value = "";
         _billable.Value = true;
         _tags.Value = [];
@@ -337,7 +397,7 @@ internal sealed class TrackTimePopup : IDisposable
 
         if (_step.Value is TrackTimeStep.Running or TrackTimeStep.ConfirmSwitch && !isRunning)
             ShowNextStep();
-        else if (_step.Value == TrackTimeStep.NewTask && _taskNumber.Value.Length == 0 && isRunning)
+        else if (_step.Value == TrackTimeStep.NewTask && _taskNumber.Value.Length == 0 && _project.Value is null && isRunning)
             _step.Value = TrackTimeStep.Running;
     }
 
@@ -350,6 +410,7 @@ internal sealed class TrackTimePopup : IDisposable
         if (_taskNumber.Value.Trim().Length == 0)
         {
             SetTaskStatus(null, Tone.Neutral, "");
+            FollowProject();
             return;
         }
 
@@ -388,6 +449,13 @@ internal sealed class TrackTimePopup : IDisposable
         }
     }
 
+    // Without a task number, the tags to pick from are those of the project picked.
+    private void FollowProject()
+    {
+        if (_step.Value == TrackTimeStep.NewTask && _taskNumber.Value.Trim().Length == 0)
+            _tagsTask.Value = _project.Value is { } project ? TeamworkTask.ForProject(project.Id, project.Name) : null;
+    }
+
     // The tags picked that are still options, as the task may have changed to one of another project since.
     private IReadOnlyList<TeamworkTag> PickedTags()
         => [.. _tags.Value.Where(_tagOptions.Value.Contains)];
@@ -407,6 +475,24 @@ internal sealed class TrackTimePopup : IDisposable
         catch (Exception)
         {
             _tagsReadAt = null;
+        }
+    }
+
+    // As seldom as the tags; without them, only a task number can be typed.
+    private async Task ReadProjectsQuietlyAsync()
+    {
+        if (_projectsReadAt is { } readAt && DateTimeOffset.UtcNow - readAt < _tagsAge || !_connection.TryGetConnection(out var site, out var token))
+            return;
+
+        _projectsReadAt = DateTimeOffset.UtcNow;
+
+        try
+        {
+            _projects.Value = await _client.GetProjectsAsync(site, token, _cancellation);
+        }
+        catch (Exception)
+        {
+            _projectsReadAt = null;
         }
     }
 

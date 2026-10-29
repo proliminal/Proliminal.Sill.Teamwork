@@ -4,12 +4,14 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Proliminal.Sill.Plugins.TeamworkTimer.Teamwork;
 
 internal sealed class TeamworkClient(HttpClient http)
 {
-    private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
+    // A timer without a task leaves its task out, rather than saying null.
+    private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web) { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
 
     public static Uri? ParseSite(string? text)
     {
@@ -72,7 +74,7 @@ internal sealed class TeamworkClient(HttpClient http)
         using var document = await SendRequestAsync(site, token, HttpMethod.Post, "projects/api/v3/me/timers.json", body, cancellation);
 
         return ReadTimer(document.RootElement.GetProperty("timer"), document.RootElement, task)
-            ?? throw new TeamworkException("Teamwork started a timer that isn't on a task.");
+            ?? throw new TeamworkException("Teamwork started a timer that isn't on a task or project.");
     }
 
     public Task<TrackedTimer> PauseTimerAsync(Uri site, string token, TrackedTimer timer, CancellationToken cancellation)
@@ -109,6 +111,34 @@ internal sealed class TeamworkClient(HttpClient http)
             notFound: "Teamwork doesn't know the time log any more; it may have been deleted there.")).Dispose();
     }
 
+    // The active projects that can be seen, by name, for time that isn't on a task; a few hundred at a time.
+    public async Task<IReadOnlyList<TeamworkProject>> GetProjectsAsync(Uri site, string token, CancellationToken cancellation)
+    {
+        const int pageSize = 500;
+
+        var projects = new List<TeamworkProject>();
+
+        for (var page = 1; ; page++)
+        {
+            using var document = await SendRequestAsync(site, token, HttpMethod.Get,
+                $"projects/api/v3/projects.json?projectStatuses=active&pageSize={pageSize}&page={page}", null, cancellation);
+
+            var root = document.RootElement;
+            var found = root.TryGetProperty("projects", out var items) && items.ValueKind == JsonValueKind.Array ? items.EnumerateArray().ToArray() : [];
+
+            projects.AddRange(found.Select(ReadProject).OfType<TeamworkProject>());
+
+            if (!HasMorePages(root) || found.Length == 0)
+                return [.. projects.OrderBy(project => project.Name, StringComparer.CurrentCultureIgnoreCase)];
+        }
+    }
+
+    private static TeamworkProject? ReadProject(JsonElement project)
+        => project.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number
+            && project.TryGetProperty("name", out var name) && name.GetString() is { Length: > 0 } text
+                ? new TeamworkProject(id.GetInt64(), text)
+                : null;
+
     // Every tag that can be seen, of every project, by name; a few hundred at a time.
     public async Task<IReadOnlyList<TeamworkTag>> GetTagsAsync(Uri site, string token, CancellationToken cancellation)
     {
@@ -126,15 +156,16 @@ internal sealed class TeamworkClient(HttpClient http)
 
             tags.AddRange(found.Select(ReadTag).OfType<TeamworkTag>());
 
-            var hasMore = root.TryGetProperty("meta", out var meta)
-                && meta.TryGetProperty("page", out var paging)
-                && paging.TryGetProperty("hasMore", out var more)
-                && more.ValueKind == JsonValueKind.True;
-
-            if (!hasMore || found.Length == 0)
+            if (!HasMorePages(root) || found.Length == 0)
                 return tags;
         }
     }
+
+    private static bool HasMorePages(JsonElement root)
+        => root.TryGetProperty("meta", out var meta)
+            && meta.TryGetProperty("page", out var paging)
+            && paging.TryGetProperty("hasMore", out var more)
+            && more.ValueKind == JsonValueKind.True;
 
     private static TeamworkTag? ReadTag(JsonElement tag)
     {
@@ -157,7 +188,10 @@ internal sealed class TeamworkClient(HttpClient http)
         if (task.ProjectId is not null)
             return task;
 
-        var found = await GetTaskAsync(site, token, task.Id, cancellation);
+        if (task.Id is not { } id)
+            throw new TeamworkException("The timer is on neither a task nor a project, so its time can't be logged. Log it in Teamwork.");
+
+        var found = await GetTaskAsync(site, token, id, cancellation);
 
         return found.ProjectId is not null
             ? found
@@ -251,13 +285,17 @@ internal sealed class TeamworkClient(HttpClient http)
 
     // A timer as Teamwork describes it. The time it ran so far is its duration, which counts the intervals before the
     // last start, and the time since it was last started while it runs; worked out against Teamwork's clock and kept
-    // against this PC's, so a clock that's off doesn't change it. A timer without a task isn't one this plugin keeps.
+    // against this PC's, so a clock that's off doesn't change it. A timer on neither a task nor a project isn't one this
+    // plugin keeps, as its time can't be logged.
     private static TrackedTimer? ReadTimer(JsonElement timer, JsonElement root, TeamworkTask? task = null)
     {
-        if (!timer.TryGetProperty("taskId", out var taskIdElement) || taskIdElement.ValueKind != JsonValueKind.Number || taskIdElement.GetInt64() == 0)
+        // Teamwork says 0 for a timer without a task or project.
+        var taskId = ReadId(timer, "taskId");
+        var projectId = ReadId(timer, "projectId");
+
+        if (taskId is null && projectId is null)
             return null;
 
-        var taskId = taskIdElement.GetInt64();
         var isRunning = timer.TryGetProperty("running", out var running) && running.GetBoolean();
         var seconds = timer.TryGetProperty("duration", out var duration) && duration.ValueKind == JsonValueKind.Number ? duration.GetInt64() : 0;
 
@@ -273,14 +311,18 @@ internal sealed class TeamworkClient(HttpClient http)
 
         if (task is null || task.Id != taskId)
         {
-            var included = FindIncluded(root, "tasks", taskId);
-            var name = included?.TryGetProperty("name", out var taskName) == true ? taskName.GetString() : null;
+            var project = projectId is { } found ? FindIncluded(root, "projects", found)?.GetProperty("name").GetString() : null;
 
-            var projectId = timer.TryGetProperty("projectId", out var projectElement) && projectElement.ValueKind == JsonValueKind.Number ? projectElement.GetInt64() : 0;
-            var project = FindIncluded(root, "projects", projectId)?.GetProperty("name").GetString();
+            if (taskId is { } id)
+            {
+                var included = FindIncluded(root, "tasks", id);
+                var name = included?.TryGetProperty("name", out var taskName) == true ? taskName.GetString() : null;
 
-            // A timer without a project says 0; its task's is looked up when it's logged.
-            task = new TeamworkTask(taskId, name ?? $"Task {taskId}", project, projectId > 0 ? projectId : null);
+                // A task's timer without a project has its task's looked up when it's logged.
+                task = new TeamworkTask(id, name ?? $"Task {id}", project, projectId);
+            }
+            else
+                task = TeamworkTask.ForProject(projectId!.Value, project ?? $"Project {projectId}");
         }
 
         return new TrackedTimer(
@@ -292,6 +334,9 @@ internal sealed class TeamworkClient(HttpClient http)
             elapsed,
             DateTimeOffset.UtcNow);
     }
+
+    private static long? ReadId(JsonElement element, string name)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.GetInt64() is > 0 and var id ? id : null;
 
     private static DateTimeOffset? ReadTime(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(value.GetString(), out var time)

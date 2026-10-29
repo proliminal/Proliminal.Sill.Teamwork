@@ -128,6 +128,61 @@ public sealed class TeamworkClientTests : IDisposable
     }
 
     [Fact]
+    public async Task GetTimersAsync_KeepsATimerOnAProject_WithoutATask()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """
+            {
+              "timers": [ { "id": 5, "taskId": 0, "projectId": 42, "running": false, "duration": 60 } ],
+              "included": { "projects": { "42": { "id": 42, "name": "Website" } } }
+            }
+            """);
+
+        var timer = Assert.Single(await _client.GetTimersAsync(_site, "tkn", TestContext.Current.CancellationToken));
+
+        Assert.Equal(TeamworkTask.ForProject(42, "Website"), timer.Task);
+        Assert.Equal("No task · Website", timer.Task.Label);
+        Assert.Equal("Website", timer.Task.Reference);
+    }
+
+    [Fact]
+    public async Task StartTimerAsync_LeavesTheTaskOut_ForTimeOnAProject()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """{ "timer": { "id": 5, "taskId": 0, "projectId": 42, "running": true, "duration": 0 } }""");
+
+        var timer = await _client.StartTimerAsync(_site, "tkn", TeamworkTask.ForProject(42, "Website"), "Misc", isBillable: false,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal("""{"timer":{"projectId":42,"description":"Misc","isBillable":false,"isRunning":true}}""", _handler.Requests.Single().Body);
+        Assert.Null(timer.Task.Id);
+        Assert.Equal(42, timer.Task.ProjectId);
+    }
+
+    [Fact]
+    public async Task GetProjectsAsync_ReadsEveryPage_ByName()
+    {
+        _handler.QueueAnswer(HttpStatusCode.OK, """
+            { "projects": [ { "id": 42, "name": "Website" }, { "id": 3, "name": "" } ], "meta": { "page": { "hasMore": true } } }
+            """);
+        _handler.QueueAnswer(HttpStatusCode.OK, """{ "projects": [ { "id": 7, "name": "Internal" } ], "meta": { "page": { "hasMore": false } } }""");
+
+        var projects = await _client.GetProjectsAsync(_site, "tkn", TestContext.Current.CancellationToken);
+
+        Assert.Equal([new TeamworkProject(7, "Internal"), new TeamworkProject(42, "Website")], projects);
+        Assert.Equal("/projects/api/v3/projects.json", _handler.Requests[0].Path);
+    }
+
+    [Fact]
+    public void IsSameAs_MatchesATask_OrAProjectWithoutATask()
+    {
+        var project = TeamworkTask.ForProject(42, "Website");
+
+        Assert.True(new TeamworkTask(123, "A", null).IsSameAs(new TeamworkTask(123, "A", "Website", 42)));
+        Assert.True(project.IsSameAs(TeamworkTask.ForProject(42, "Project 42")));
+        Assert.False(project.IsSameAs(new TeamworkTask(123, "A", "Website", 42)));
+        Assert.False(new TeamworkTask(123, "A", "Website", 42).IsSameAs(project));
+    }
+
+    [Fact]
     public async Task StartTimerAsync_StartsTheTimer_InItsTasksProject()
     {
         _handler.QueueAnswer(HttpStatusCode.OK, """{ "timer": { "id": 5, "taskId": 123, "projectId": 42, "running": true, "duration": 0 } }""");

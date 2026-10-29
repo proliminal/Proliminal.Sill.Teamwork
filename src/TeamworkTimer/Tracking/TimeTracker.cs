@@ -26,8 +26,11 @@ internal sealed class TimeTracker : IDisposable
     private readonly State<PendingLog?> _pendingLog = Value.State<PendingLog?>(null);
 
     // The timers paused here, until they're logged or discarded. A paused timer this plugin didn't pause is left alone,
-    // as it may be paused on purpose in Teamwork.
+    // as it may be paused on purpose in Teamwork, until it's picked up to start its task again.
     private readonly HashSet<long> _pausedHere = [];
+
+    // Every timer Teamwork last said there is, running or paused.
+    private IReadOnlyList<TrackedTimer> _timers = [];
 
     // The tags picked when a timer was started here, for its time log; a timer can't keep them in Teamwork.
     private readonly Dictionary<long, IReadOnlyList<TeamworkTag>> _tags = [];
@@ -76,6 +79,17 @@ internal sealed class TimeTracker : IDisposable
             _tags[started.Id] = tags;
 
         _timer.Value = started;
+    }
+
+    // A paused timer Teamwork has for the task already, as Teamwork starts no second one for it.
+    public TrackedTimer? FindPausedTimer(TeamworkTask task)
+        => _timers.FirstOrDefault(timer => !timer.IsRunning && timer.Task.IsSameAs(task));
+
+    // Takes a paused timer as this plugin's, to resume, log or discard, as one it paused itself.
+    public void PickUp(TrackedTimer paused)
+    {
+        _pausedHere.Add(paused.Id);
+        _timer.Value = paused;
     }
 
     // None for a timer started in Teamwork, or before Sill last started.
@@ -231,6 +245,8 @@ internal sealed class TimeTracker : IDisposable
     // What Teamwork says runs: the running timer, or else one this plugin paused, as long as Teamwork still has it.
     private void ApplyTimers(IReadOnlyList<TrackedTimer> timers)
     {
+        _timers = timers;
+
         var known = new[] { _timer.Value, _pendingLog.Value?.Timer }.OfType<TrackedTimer>().Select(timer => timer.Id).Concat(_pausedHere).ToHashSet();
 
         _timer.Value = timers.FirstOrDefault(timer => timer.IsRunning)

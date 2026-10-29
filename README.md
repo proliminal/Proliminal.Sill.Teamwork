@@ -1,7 +1,8 @@
 # Teamwork timer for Sill
 
-Track time on Teamwork tasks from [Sill](https://github.com/proliminal/sill). Start a timer for a task number, stop it
-from the popup or Sill's quick menu, and log the time on the task. Pin the popup to keep the timer on screen.
+Track time on Teamwork tasks from [Sill](https://github.com/proliminal/sill). Start a timer for a task number, or for a project
+when the time isn't on a task. Stop it from the popup or Sill's quick menu, and log the time. Pin the popup to keep the
+timer on screen.
 
 ## Install
 
