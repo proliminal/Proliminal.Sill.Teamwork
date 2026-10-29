@@ -26,12 +26,15 @@ public sealed class TeamworkTimerPlugin : IPlugin
         var settings = context.GetSettings<TimerSettings>();
         var connection = new TeamworkConnection(settings, context.GetSecret("ApiToken"));
         var client = new TeamworkClient(_http);
+        var catalog = new TeamworkCatalog(client, connection, _disposed.Token);
 
         var tracker = _tracker = new TimeTracker(context, client, connection, _disposed.Token);
-        var popup = _popup = new TrackTimePopup(tracker, client, connection, _disposed.Token);
+        var popup = _popup = new TrackTimePopup(tracker, client, catalog, connection, settings, _disposed.Token);
+        var profilePopup = new ProfilePopup(settings, catalog, client, connection, _disposed.Token);
 
         var site = settings.Value(options => options.Site, (options, value) => options.Site = value.Trim());
         var rounding = settings.Value(options => options.Rounding, (options, value) => options.Rounding = value);
+        var profiles = settings.Value(options => (IReadOnlyList<TimerProfile>)options.Profiles, (options, value) => options.Profiles = [.. value]);
 
         var timerLabel = tracker.Timer.Map(timer => timer is null ? "" : timer.IsRunning ? timer.Task.Label : $"Paused, not logged yet: {timer.Task.Label}");
 
@@ -67,7 +70,16 @@ public sealed class TeamworkTimerPlugin : IPlugin
                     .Option(MidpointRounding.AwayFromZero, "Nearest minute, half a minute up")
                     .Option(MidpointRounding.ToEven, "Nearest minute, half a minute to even")
                     .Option(MidpointRounding.ToZero, "Down, towards zero")
-                    .Option(MidpointRounding.ToPositiveInfinity, "Up, to the next minute"))));
+                    .Option(MidpointRounding.ToPositiveInfinity, "Up, to the next minute")))
+            .Group("Profiles", group => group
+                .Button("Add a profile", "Add", profilePopup.ShowNew, button => button
+                    .Icon(Glyph.Work)
+                    .Description("A button in Track time that fills in a task or project, a description and tags, for time you track often, such as on tickets.")
+                    .Keywords("preset", "template"))
+                .List(profiles, profile => profile.Name, list => list
+                    .Description(profile => profile.Summary is { Length: > 0 } summary ? summary : null)
+                    .Action(Glyph.Edit, "Change", (profile, action) => profilePopup.ShowEdit(profile, action))
+                    .Action(Glyph.Delete, "Delete", (profile, _) => profiles.SetAsync([.. profiles.Value.Where(other => other.Id != profile.Id)])))));
 
         context.AddQuickAction("Track time", Glyph.Clock, popup.Show);
 

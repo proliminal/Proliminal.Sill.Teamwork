@@ -4,6 +4,9 @@ Track time on Teamwork tasks from [Sill](https://github.com/proliminal/sill). St
 when the time isn't on a task. Stop it from the popup or Sill's quick menu, and log the time. Pin the popup to keep the
 timer on screen.
 
+For time you track often, add a profile on the settings page, under **Profiles**: a task or project, a description,
+tags and whether it's billable. Its button in the popup fills those in, ready to start.
+
 ## Install
 
 1. Download the latest release.

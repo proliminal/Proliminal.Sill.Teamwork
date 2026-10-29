@@ -15,12 +15,11 @@ internal sealed class TrackTimePopup : IDisposable
     // How long typing pauses before the task is looked up.
     private static readonly TimeSpan _lookupDelay = TimeSpan.FromMilliseconds(400);
 
-    // How long the tags and projects read from Teamwork are kept before the popup reads them again.
-    private static readonly TimeSpan _tagsAge = TimeSpan.FromMinutes(10);
-
     private readonly TimeTracker _tracker;
     private readonly TeamworkClient _client;
+    private readonly TeamworkCatalog _catalog;
     private readonly TeamworkConnection _connection;
+    private readonly IPluginSettings<TimerSettings> _settings;
     private readonly CancellationToken _cancellation;
 
     // What the popup asks, and what's typed in it.
@@ -33,15 +32,11 @@ internal sealed class TrackTimePopup : IDisposable
 
     // The project for time that isn't on a task, picked when no task number is typed.
     private readonly State<TeamworkProject?> _project = Value.State<TeamworkProject?>(null);
-    private readonly State<IReadOnlyList<TeamworkProject?>> _projects = Value.State<IReadOnlyList<TeamworkProject?>>([]);
     private readonly IReadOnlyValue<bool> _isWithoutTask;
-    private DateTimeOffset? _projectsReadAt;
 
     // The tags to pick from: those for every project, then those of the task's project once it's known.
-    private readonly State<IReadOnlyList<TeamworkTag>> _allTags = Value.State<IReadOnlyList<TeamworkTag>>([]);
     private readonly State<TeamworkTask?> _tagsTask = Value.State<TeamworkTask?>(null);
     private readonly IReadOnlyValue<IReadOnlyList<TeamworkTag>> _tagOptions;
-    private DateTimeOffset? _tagsReadAt;
 
     // A word or two beside the task number, and the task's name or what's wrong under its title, where there's room.
     private readonly State<string?> _taskStatus = Value.State<string?>(null);
@@ -64,14 +59,17 @@ internal sealed class TrackTimePopup : IDisposable
     // Discard asks once more before it throws the time away.
     private bool _isDiscardArmed;
 
-    public TrackTimePopup(TimeTracker tracker, TeamworkClient client, TeamworkConnection connection, CancellationToken cancellation)
+    public TrackTimePopup(TimeTracker tracker, TeamworkClient client, TeamworkCatalog catalog, TeamworkConnection connection, IPluginSettings<TimerSettings> settings,
+        CancellationToken cancellation)
     {
         _tracker = tracker;
         _client = client;
+        _catalog = catalog;
         _connection = connection;
+        _settings = settings;
         _cancellation = cancellation;
 
-        _tagOptions = _allTags.Combine(_tagsTask, (tags, task) => (IReadOnlyList<TeamworkTag>)
+        _tagOptions = catalog.Tags.Combine(_tagsTask, (tags, task) => (IReadOnlyList<TeamworkTag>)
             [.. tags.Where(tag => tag.IsFor(task?.ProjectId)).OrderBy(tag => tag.ProjectId == 0 ? 0 : 1)]);
 
         _isWithoutTask = _step.Combine(_taskNumber, (step, number) => step == TrackTimeStep.NewTask && number.Trim().Length == 0);
@@ -110,8 +108,7 @@ internal sealed class TrackTimePopup : IDisposable
         if (_step.Value is TrackTimeStep.NewTask)
             _ = _tracker.RefreshTimersQuietlyAsync();
 
-        _ = ReadTagsQuietlyAsync();
-        _ = ReadProjectsQuietlyAsync();
+        _catalog.ReadQuietly();
     }
 
     public async Task StopFromMenuAsync(IActionContext action)
@@ -136,6 +133,7 @@ internal sealed class TrackTimePopup : IDisposable
                 .Description(_tracker.Timer.Map(timer => timer?.Task.Label ?? ""))
                 .Status(_tracker.Clock)
                 .VisibleWhen(IsStep(TrackTimeStep.Running, TrackTimeStep.ConfirmSwitch)))
+            .Info("Profiles", DescribeProfiles)
             .TextBox("Task number", _taskNumber, text => text
                 .Description(_taskFound)
                 .Placeholder("12345, or none for a project")
@@ -145,7 +143,7 @@ internal sealed class TrackTimePopup : IDisposable
                 .VisibleWhen(IsStep(TrackTimeStep.NewTask)))
             .Picker("Project", _project, picker => picker
                 .Description("For time that isn't on a task.")
-                .Options(_projects, project => project?.Name ?? "")
+                .Options(_catalog.Projects, project => project?.Name ?? "")
                 .VisibleWhen(_isWithoutTask))
             .Info("Stopped", info => info
                 .Icon(Glyph.Clock)
@@ -183,6 +181,30 @@ internal sealed class TrackTimePopup : IDisposable
             .Command("Resume", ResumeTimerAsync, command => command.Key('R').VisibleWhen(IsStep(TrackTimeStep.LogTime)))
             .Command("Log time", LogTimeAsync, command => command.IsDefault().VisibleWhen(IsStep(TrackTimeStep.LogTime)));
 
+    // A button per profile, as the settings have them when the popup opens.
+    private void DescribeProfiles(InfoBuilder info)
+    {
+        var profiles = _settings.Current.Profiles;
+
+        foreach (var profile in profiles)
+            info.Action(profile.Name, _ => ApplyProfile(profile));
+
+        info
+            .Icon(Glyph.Work)
+            .VisibleWhen(_step.Map(step => step == TrackTimeStep.NewTask && profiles.Count > 0));
+    }
+
+    // Fills in what the profile has, to start as it is or to change first.
+    private void ApplyProfile(TimerProfile profile)
+    {
+        _taskNumber.Value = profile.TaskId?.ToString(CultureInfo.InvariantCulture) ?? "";
+        _project.Value = profile is { TaskId: null, ProjectId: { } projectId } ? _catalog.FindProject(projectId, profile.Project) : null;
+        _description.Value = profile.Description;
+        _billable.Value = profile.IsBillable;
+        _tags.Value = [.. profile.Tags.Select(tag => _catalog.FindTag(tag.ToTag()))];
+        _message.Value = null;
+    }
+
     private IReadOnlyValue<bool> IsStep(params TrackTimeStep[] steps)
         => _step.Map(steps.Contains);
 
@@ -200,6 +222,9 @@ internal sealed class TrackTimePopup : IDisposable
 
         // One may have been started in Teamwork since.
         await _tracker.RefreshTimersAsync();
+
+        // Its tags, even when it was started before the task was looked up.
+        _tagsTask.Value = task;
 
         var queued = new QueuedTimer(task, _description.Value.Trim(), _billable.Value, PickedTags());
 
@@ -332,7 +357,7 @@ internal sealed class TrackTimePopup : IDisposable
         }
         catch (Exception)
         {
-            _project.Value = queued.Task.Id is null ? _projects.Value.FirstOrDefault(project => project?.Id == queued.Task.ProjectId) : null;
+            _project.Value = queued.Task is { Id: null, ProjectId: { } projectId } ? _catalog.FindProject(projectId, queued.Task.Project) : null;
             _taskNumber.Value = queued.Task.Id?.ToString(CultureInfo.InvariantCulture) ?? "";
             _description.Value = queued.Description;
             _billable.Value = queued.IsBillable;
@@ -456,45 +481,9 @@ internal sealed class TrackTimePopup : IDisposable
             _tagsTask.Value = _project.Value is { } project ? TeamworkTask.ForProject(project.Id, project.Name) : null;
     }
 
-    // The tags picked that are still options, as the task may have changed to one of another project since.
+    // The tags picked that are for the task's project, as the task may have changed to one of another project since.
     private IReadOnlyList<TeamworkTag> PickedTags()
-        => [.. _tags.Value.Where(_tagOptions.Value.Contains)];
-
-    // Once in a while, as tags are seldom added; without them, only the tags picked before can be picked.
-    private async Task ReadTagsQuietlyAsync()
-    {
-        if (_tagsReadAt is { } readAt && DateTimeOffset.UtcNow - readAt < _tagsAge || !_connection.TryGetConnection(out var site, out var token))
-            return;
-
-        _tagsReadAt = DateTimeOffset.UtcNow;
-
-        try
-        {
-            _allTags.Value = await _client.GetTagsAsync(site, token, _cancellation);
-        }
-        catch (Exception)
-        {
-            _tagsReadAt = null;
-        }
-    }
-
-    // As seldom as the tags; without them, only a task number can be typed.
-    private async Task ReadProjectsQuietlyAsync()
-    {
-        if (_projectsReadAt is { } readAt && DateTimeOffset.UtcNow - readAt < _tagsAge || !_connection.TryGetConnection(out var site, out var token))
-            return;
-
-        _projectsReadAt = DateTimeOffset.UtcNow;
-
-        try
-        {
-            _projects.Value = await _client.GetProjectsAsync(site, token, _cancellation);
-        }
-        catch (Exception)
-        {
-            _projectsReadAt = null;
-        }
-    }
+        => [.. _tags.Value.Where(tag => tag.IsFor(_tagsTask.Value?.ProjectId))];
 
     private void SetTaskStatus(string? status, Tone tone, string found)
     {
